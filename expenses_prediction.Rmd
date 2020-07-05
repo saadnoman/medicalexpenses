@@ -1,0 +1,508 @@
+# Medical Expenses Prediction Project
+
+## Load libraries and set working directory
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(mgcv)
+library(glmnet)
+library(boot)
+#library(caret)
+
+
+
+setwd("~/data expenses")
+```
+
+## Read data and transformation of variables
+```{r}
+# read data
+ins_df <- read.csv("insurance.csv")
+
+#bmi transformation
+ins_df <- mutate(ins_df, bmi_category = ifelse(bmi <  18.5, "under weight", 
+                                       ifelse(bmi >= 18.5 & bmi < 25, "normal weight",
+                                              ifelse(bmi >= 25 & bmi < 30, "over weight", "obesity"))))
+ins_df <- mutate(ins_df, bmi_category = as.factor(bmi_category))
+ins_df <- mutate(ins_df, children_factor = as.factor(children))
+ins_df <- mutate(ins_df, children2 = children^2)
+ins_df <- mutate(ins_df, hasChildren = ifelse(children == 0, "no child", "has children"))
+
+# log charges
+ins_df <- mutate(ins_df, log_charges = log(charges))
+
+
+```
+
+##correlations
+```{r}
+
+corr_df <- ins_df
+
+corr_df <- cbind(corr_df, data.frame(model.matrix(~ins_df$region-1)))
+corr_df <- cbind(corr_df, data.frame(model.matrix(~ins_df$sex-1)))
+corr_df <- cbind(corr_df, data.frame(model.matrix(~ins_df$smoker-1)))
+
+corr_df <- select(corr_df, -c("sex", "region", "smoker", "bmi_category", "children_factor"))
+
+View(cor(corr_df))
+
+```
+
+
+## Hypothesis
+Health insurance companies stand to make money if the person is unlikely to claim the insurance. And so we expect insruance companies to charge premium based on their perceivied risk. The preimums would be lower for a healthy person who will not require frequent medical examinations,  or is not susciptle to diseases (e.g. heart, lung, cancer etc.). 
+
+Based on above premise, we can make the following hypothesis
+
+We expect a higher premium charges for
+1) Older people - as they have a high risk of having medical conditions
+2) Smokers are considered high risk for lung disease, and so would be at higher premiums
+3) BMI over weight or obese are higher risk of developing diseases
+
+## Examine charges distribution
+```{r}
+summary(ins_df$charges)
+ins_df %>%
+  ggplot(aes(x = charges)) +
+  geom_histogram() +
+  labs(title = "Charges Histogram")
+
+```
+
+We oberve a right skewed distribution. To correct for this we log charges to get close to a normal distribution.
+
+```{r}
+ins_df %>%
+  ggplot(aes(x = charges, fill = children_factor)) +
+  geom_histogram() +
+  labs(title = "Charges Histogram")
+
+```
+
+## Log charges distribution
+```{r}
+ins_df %>%
+  ggplot(aes(x = log_charges)) +
+  geom_histogram() +
+  labs(title = "Log Charges Histogram")
+```
+
+Skewness has been corrected, but it still does not appear an ideal normal distribution
+
+## Does age have an impact on premium charges
+```{r}
+
+#age and charges
+ins_df %>%
+  ggplot(aes(x = age, y = charges)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Age and Charges Scatter Plot")
+
+cor(ins_df$age, ins_df$charges)
+summary(lm(charges ~ age, data = ins_df))
+
+```
+
+* Age and charges have a correlation of 0.29
+* We observe a linear relationship of age and charges, as p value in regression is significant.
+* On average, each year of age increases charges by $257. The model has an R^2 of 8%
+* We also see a indication of three separate groups. This may point to presence of interaction variables with age like BMI, smoker, gender.
+
+## Explore interaction terms
+```{r}
+
+ins_df %>%
+  ggplot(aes(x = age, y = charges, col = smoker)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Age and Charges Scatter Plot")
+```
+
+* age and smoker interaction term might be useful to add in regression
+
+## Examine age with log charges
+```{r}
+#age and log charges
+ins_df %>%
+  ggplot(aes(x = age, y = log_charges)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Age and Log Charges Scatter Plot")
+cor(ins_df$age, ins_df$log_charges)
+summary(lm(log_charges ~ age, data = ins_df))
+
+```
+
+Using log charges
+
+* correlation improves to 0.52
+* the linear model also improves. Tthe p value of age is significant and R^2 improves to 27.8%.
+
+We can conclude age has significant impact on medical charges.
+
+## Smokers
+```{r}
+ins_df %>%
+  ggplot(aes(x = smoker, y = charges, col = smoker)) + geom_boxplot()
+
+#smoker_t_test <- t.test(ins_df$log_charges ~ ins_df$smoker)
+smoker_t_test <- t.test(ins_df$charges ~ ins_df$smoker)
+smoker_t_test
+as.numeric(smoker_t_test$estimate[2] - smoker_t_test$estimate[1])
+#exp(smoker_t_test$estimate)
+#as.numeric(exp(smoker_t_test$estimate)[2] - exp(smoker_t_test$estimate)[1])
+
+```
+
+* Visually, it appears quite evident smokers have a higher premium charge
+* Running a test (using log charges), we observe a significant difference up in mean charges between smokers and non-smokers. The difference in mean is about $23,298.43
+* We can conlude that smokers do have a higher preimum
+
+## How do charges vary with BMI
+```{r}
+#bmi and log charges
+ins_df %>%
+  ggplot(aes(x = bmi, y = charges)) +
+  geom_point() +
+  #geom_smooth() +
+  geom_smooth(method = "lm") +
+  labs(title = "BMI and Charges Scatter Plot") + theme_bw()
+cor(ins_df$bmi, ins_df$charges)
+summary(lm(charges ~ bmi, data = ins_df))
+
+```
+
+
+
+## How do charges vary with BMI category
+```{r}
+
+bmi_mean_charges <- ins_df %>%
+  group_by(bmi_category) %>% 
+  summarise(mean_charges = mean(charges),
+            sd = sd(charges),
+            n = n(),
+            se = sd/sqrt(n),
+            up_ci = mean_charges + (qnorm(0.975) * se),
+            lo_ci = mean_charges - (qnorm(0.975) * se))
+
+
+ggplot(bmi_mean_charges, aes(x = bmi_category, y = mean_charges, col = bmi_category)) +
+  geom_point(shape=21, fill="black") +
+  geom_errorbar(aes(ymin = lo_ci,
+                     ymax = up_ci),
+                     width = 0.05,
+                     size  = 0.5) +
+  labs(title = "Mean Plot with 95 CI")
+
+
+summary(aov(charges ~ bmi_category, data = ins_df))
+
+
+```
+
+* Anova test shows significant difference in means accross the BMI categories
+* Using means plot we observe that obese customers have higher premium charges
+
+## Gender and charges
+```{r}
+
+ins_df %>%
+  ggplot(aes(x = sex, y = charges, col = sex)) + geom_boxplot()
+
+ins_df %>%
+  ggplot(aes(x = log_charges, fill = sex)) + geom_histogram()
+
+sex_t_test <- t.test(ins_df$charges ~ ins_df$sex)
+sex_t_test
+
+```
+
+* Gender does not a have significant impact on charges
+
+
+
+## Region and charges
+```{r}
+
+region_mean_charges <- ins_df %>%
+  group_by(region) %>% 
+  summarise(mean_charges = mean(charges),
+            sd = sd(charges),
+            n = n(),
+            se = sd/sqrt(n),
+            up_ci = mean_charges + (qnorm(0.975) * se),
+            lo_ci = mean_charges - (qnorm(0.975) * se))
+
+
+ggplot(region_mean_charges, aes(x = region, y = mean_charges, col = region)) +
+  geom_point(shape=21, fill="black") +
+  geom_errorbar(aes(ymin = lo_ci,
+                     ymax = up_ci),
+                     width = 0.05,
+                     size  = 0.5) +
+  labs(title = "Mean Plot with 95 CI")
+
+
+summary(aov(charges ~ region, data = ins_df))
+
+```
+
+* Anova test on regions with charges shows a significant relationship
+* The premium charges are higher if the person is living in southeast region 
+
+
+## Examine charges with children
+```{r}
+
+ins_df %>%
+  ggplot(aes(x = children, y = log_charges)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Children and Log Charges Scatter Plot")
+cor(ins_df$children, ins_df$log_charges)
+summary(lm(log_charges ~ children + children2, data = ins_df))
+
+anova(lm(log_charges ~ children, data = ins_df), lm(log_charges ~ children + children2, data = ins_df))
+
+```
+
+## has children and charges
+```{r}
+
+ins_df %>%
+  ggplot(aes(x = hasChildren, y = charges, col = hasChildren)) + geom_boxplot()
+
+ins_df %>%
+  ggplot(aes(x = charges, fill = hasChildren)) + geom_histogram()
+
+children_t_test <- t.test(ins_df$charges ~ ins_df$hasChildren)
+children_t_test
+
+```
+
+
+## Examine charges with children
+```{r}
+
+ins_df %>%
+  ggplot(aes(x = children_factor, y = log_charges)) +
+  geom_boxplot() +
+  labs(title = "Children Factor and Log Charges Scatter Plot")
+
+```
+
+## Linear regression: log_charges = age * smoker + bmi_category + region
+```{r}
+
+lr1 <- lm(log_charges ~ age * smoker + bmi_category + region, data = ins_df)
+
+summary(lr1)
+
+```
+
+
+With this model we get an R^2 of 78.47
+
+* Holding other variables constant, on average, if age increases by 1, charges will increase by `r 100*lr1$coefficients[2]` percent
+* Holding other variables constant, on average, if the person is a smoker, charges will increase by `r 100*lr1$coefficients[3]` percent
+* Holding other variables constant, on average, if the person is obese, charges will increase by `r 100*lr1$coefficients[4]` percent
+* After fitting the linear regression model, holding other variables constant, we notice that all regions have a negative coefficent i.e. if the person is not from northeast region, the charges will decrease.
+
+
+
+## Linear regression: charges = age + bmi * smoker + region + children + children2
+```{r}
+
+lr2 <- lm(charges ~ age + bmi * smoker + region + children , data = ins_df)
+
+summary(lr2)
+
+```
+
+
+
+## regression residuals
+```{r}
+mean(ins_df$charges)
+predict_lr2 <- predict(lr2, ins_df)
+(mean(lr2$residuals^2))^0.5
+
+hist(lr2$residuals)
+
+#orig_values <- data.frame(charges = exp(ins_df$log_charges),
+#                         pred_charges = exp(predict_lr2))
+#orig_values$residuals <- orig_values$charges - orig_values$pred_charges
+#orig_values$residuals2 <- orig_values$residuals^2
+#(mean(orig_values$residuals2))^0.5
+
+
+
+```
+
+
+
+## generalized additive model
+```{r}
+#library(mgcv)
+
+#gam1 <- gam(charges ~ s(age, by = smoker) + smoker + s(bmi, by = smoker) + children_factor + region,
+#            data = ins_df, method = "REML")
+
+
+gam1 <- gam(charges ~ s(age) + smoker + s(bmi, by = smoker, sp = 0.1) + s(children, k = 5) + region + sex,
+            data = ins_df, method = "REML")
+
+summary(gam1)
+
+plot(gam1, shift=coef(gam1)[1])
+
+#gam2 <- gam(charges ~ s(age) + smoker + s(bmi, by = smoker, sp = 0.1),
+#            data = ins_df, method = "REML")
+
+#anova(gam2, gam1, test = "F")
+
+
+```
+
+linear terms signifiancat
+
+smooth terms 
+effective degrees of freedom
+1 => straight line
+2 => quadratic
+more wiggly
+
+
+
+## gam residuals
+```{r}
+
+predict_gam1 <- predict(gam1, ins_df)
+(mean(gam1$residuals^2))^0.5
+
+hist(gam1$residuals)
+plot(gam1$residuals)
+
+#for log charges
+#orig_values <- data.frame(charges = exp(ins_df$log_charges),
+#                         pred_charges = exp(predict_gam1))
+#orig_values$residuals <- orig_values$charges - orig_values$pred_charges
+#orig_values$residuals2 <- orig_values$residuals^2
+
+#(mean(orig_values$residuals2))^0.5
+
+```
+
+
+
+
+## cv with linear regression
+```{r}
+
+glm_lr2 <- glm(charges ~ age + bmi * smoker + region + children , data = ins_df)
+
+cv5_lr2 <- cv.glm(ins_df, glm_lr2, K = 5)
+mse_cv5_lr2 <- cv5_lr2$delta[2]
+rmse_cv5_lr2 <- mse_cv5_lr2^0.5
+rmse_cv5_lr2
+?cv.glm
+
+```
+
+
+
+## cv with gam
+```{r}
+
+#gam_cv <- gam(charges ~ s(age) + smoker + s(bmi, by = smoker) + s(children, k = 3) + region,
+#            data = ins_df, method = "REML")
+gam_cv <- gam(charges ~ s(age) + smoker + s(bmi, by = smoker, sp = 0.1) + s(children, k = 5) + region + sex,
+            data = ins_df, method = "REML")
+
+
+
+cv5_gam <- cv.glm(ins_df, gam_cv, K = 5)
+mse_cv5_gam <- cv5_gam$delta[2]
+rmse_cv5_gam <- mse_cv5_gam^0.5
+rmse_cv5_gam
+
+
+
+```
+
+
+## conclusion
+```{r}
+#smoker
+ins_df %>%
+  group_by(smoker) %>%
+  summarise(mean = mean(charges))
+
+32050.232 - 8434.268
+
+
+#age > 40
+ins_df %>%
+  mutate(over40 = ifelse(age >= 40, 1,0)) %>%
+  group_by(over40) %>%
+  summarise(mean = mean(charges))
+
+16430.51 - 10157.22
+
+
+#bmi > 30
+ins_df %>%
+  mutate(over30 = ifelse(bmi >= 30, 1,0)) %>%
+  group_by(over30) %>%
+  summarise(mean = mean(charges))
+15552.34 - 10713.67
+
+#region > 30
+ins_df %>%
+  mutate(seregion = ifelse(region == "southeast", 1,0)) %>%
+  group_by(seregion) %>%
+  summarise(mean = mean(charges))
+14735.41 - 12722.93
+
+
+#all above
+ins_df %>%
+  mutate(over40 = ifelse(age >= 40, 1,0)) %>%
+  mutate(over30 = ifelse(bmi >= 30, 1,0)) %>%
+  mutate(seregion = ifelse(region == "southeast", 1,0)) %>%
+  mutate(isall = ifelse(seregion == 1 & over30 == 1 & over40 == 1 & smoker == "yes", 1,0)) %>%
+  group_by(isall) %>%
+  summarise(mean = mean(charges))
+
+46141.12 - 12490.78
+
+
+```
+
+
+
+```{r}
+
+str(ins_df)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
